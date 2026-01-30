@@ -51,6 +51,83 @@ const clipboardWrite = (text) => new Promise((resolve, reject) => {
     });
 });
 
+// Camera via ffmpeg (Windows DirectShow)
+const listCameras = () => new Promise((resolve, reject) => {
+    exec('ffmpeg -list_devices true -f dshow -i dummy 2>&1', { encoding: 'utf8' }, (err, stdout, stderr) => {
+        const output = stdout || stderr || '';
+        const cameras = [];
+        const lines = output.split('\n');
+        let isVideo = false;
+        for (const line of lines) {
+            if (line.includes('DirectShow video devices')) {
+                isVideo = true;
+                continue;
+            }
+            if (line.includes('DirectShow audio devices')) {
+                isVideo = false;
+                continue;
+            }
+            if (isVideo) {
+                const match = line.match(/"([^"]+)"/);
+                if (match && !line.includes('Alternative name')) {
+                    cameras.push({ name: match[1], index: cameras.length });
+                }
+            }
+        }
+        resolve({ cameras });
+    });
+});
+
+const captureCamera = (params = {}) => new Promise((resolve, reject) => {
+    const cameraName = params.camera || 'Integrated Camera';
+    const tempFile = path.join(os.tmpdir(), `camera_${Date.now()}.jpg`);
+    const cmd = `ffmpeg -f dshow -i video="${cameraName}" -frames:v 1 -y "${tempFile}" 2>&1`;
+    exec(cmd, { timeout: 10000, windowsHide: true }, (err, stdout, stderr) => {
+        if (err && !fs.existsSync(tempFile)) {
+            reject(new Error(`Camera capture failed: ${err.message}`));
+            return;
+        }
+        fs.readFile(tempFile, (readErr, data) => {
+            fs.unlink(tempFile, () => {});
+            if (readErr) {
+                reject(readErr);
+            } else {
+                resolve({
+                    base64: data.toString('base64'),
+                    format: 'jpg',
+                    size: data.length,
+                });
+            }
+        });
+    });
+});
+
+const recordClip = (params = {}) => new Promise((resolve, reject) => {
+    const cameraName = params.camera || 'Integrated Camera';
+    const duration = Math.min(params.duration || 5, 30); // max 30s
+    const tempFile = path.join(os.tmpdir(), `clip_${Date.now()}.mp4`);
+    const cmd = `ffmpeg -f dshow -i video="${cameraName}" -t ${duration} -c:v libx264 -preset ultrafast -y "${tempFile}" 2>&1`;
+    exec(cmd, { timeout: (duration + 10) * 1000, windowsHide: true }, (err) => {
+        if (err && !fs.existsSync(tempFile)) {
+            reject(new Error(`Clip recording failed: ${err.message}`));
+            return;
+        }
+        fs.readFile(tempFile, (readErr, data) => {
+            fs.unlink(tempFile, () => {});
+            if (readErr) {
+                reject(readErr);
+            } else {
+                resolve({
+                    base64: data.toString('base64'),
+                    format: 'mp4',
+                    size: data.length,
+                    duration,
+                });
+            }
+        });
+    });
+});
+
 // Paths
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 const LOG_PATH = path.join(__dirname, 'log.txt');
@@ -1025,8 +1102,8 @@ function sendConnect() {
             mode: clientMode,
             instanceId: config?.nodeId || 'windows-pc',
         },
-        caps: ['system', 'browser', 'clipboard', 'screen'],
-        commands: ['system.run', 'system.which', 'browser.proxy', 'notification', 'clipboard.read', 'clipboard.write', 'screen.capture'],
+        caps: ['system', 'browser', 'clipboard', 'screen', 'camera'],
+        commands: ['system.run', 'system.which', 'browser.proxy', 'notification', 'clipboard.read', 'clipboard.write', 'screen.capture', 'camera.list', 'camera.snap', 'camera.clip'],
         permissions: {
             exec: true,
             camera: false,
@@ -1104,7 +1181,7 @@ function handleEvent(event, payload) {
                     nodeId: config?.nodeId || 'windows-pc',
                     nodeName: config?.nodeName || os.hostname(),
                     platform: 'windows',
-                    caps: ['system.run', 'browser.proxy', 'notification', 'clipboard', 'screen', 'exec']
+                    caps: ['system.run', 'browser.proxy', 'notification', 'clipboard', 'screen', 'camera', 'exec']
                 });
                 notify('Clawd Node', 'Solicitando pareamento - aprove no Gateway');
             } else {
@@ -1193,7 +1270,7 @@ async function handleMessage(msg) {
                             nodeId: config?.nodeId || 'windows-pc',
                             nodeName: config?.nodeName || os.hostname(),
                             platform: 'windows',
-                            caps: ['system.run', 'browser.proxy', 'notification', 'clipboard', 'screen', 'exec']
+                            caps: ['system.run', 'browser.proxy', 'notification', 'clipboard', 'screen', 'camera', 'exec']
                         });
                         notify('Clawd Node', 'Solicitando pareamento - aprove no Gateway');
                     } else {
@@ -1424,6 +1501,36 @@ async function handleNodeInvoke(payload) {
                 }
                 break;
 
+            case 'camera.list':
+                try {
+                    const cameras = await listCameras();
+                    sendNodeInvokeResult(id, nodeId, true, cameras);
+                } catch (camListErr) {
+                    log(`Camera list error: ${camListErr.message}`);
+                    sendNodeInvokeResult(id, nodeId, false, null, { code: 'ERROR', message: camListErr.message });
+                }
+                break;
+
+            case 'camera.snap':
+                try {
+                    const camSnap = await captureCamera(params);
+                    sendNodeInvokeResult(id, nodeId, true, camSnap);
+                } catch (camSnapErr) {
+                    log(`Camera snap error: ${camSnapErr.message}`);
+                    sendNodeInvokeResult(id, nodeId, false, null, { code: 'ERROR', message: camSnapErr.message });
+                }
+                break;
+
+            case 'camera.clip':
+                try {
+                    const camClip = await recordClip(params);
+                    sendNodeInvokeResult(id, nodeId, true, camClip);
+                } catch (camClipErr) {
+                    log(`Camera clip error: ${camClipErr.message}`);
+                    sendNodeInvokeResult(id, nodeId, false, null, { code: 'ERROR', message: camClipErr.message });
+                }
+                break;
+
             default:
                 log(`Comando desconhecido: ${command}`);
                 sendNodeInvokeResult(id, nodeId, false, null, { code: 'UNAVAILABLE', message: `Unknown command: ${command}` });
@@ -1505,6 +1612,36 @@ async function handleInvoke(id, method, params) {
                 } catch (screenErr) {
                     log(`Screenshot error: ${screenErr.message}`);
                     send({ type: 'invoke-res', id, ok: false, error: screenErr.message });
+                }
+                break;
+
+            case 'camera.list':
+                try {
+                    const cams = await listCameras();
+                    send({ type: 'invoke-res', id, ok: true, payload: cams });
+                } catch (camErr) {
+                    log(`Camera list error: ${camErr.message}`);
+                    send({ type: 'invoke-res', id, ok: false, error: camErr.message });
+                }
+                break;
+
+            case 'camera.snap':
+                try {
+                    const snap = await captureCamera(params);
+                    send({ type: 'invoke-res', id, ok: true, payload: snap });
+                } catch (snapErr) {
+                    log(`Camera snap error: ${snapErr.message}`);
+                    send({ type: 'invoke-res', id, ok: false, error: snapErr.message });
+                }
+                break;
+
+            case 'camera.clip':
+                try {
+                    const clip = await recordClip(params);
+                    send({ type: 'invoke-res', id, ok: true, payload: clip });
+                } catch (clipErr) {
+                    log(`Camera clip error: ${clipErr.message}`);
+                    send({ type: 'invoke-res', id, ok: false, error: clipErr.message });
                 }
                 break;
 
