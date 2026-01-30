@@ -1,0 +1,8 @@
+node_modules/
+.lock
+log.txt
+status.txt
+nul
+screenCapture/
+config.json
+*.exe

@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install)",
+      "Bash(npm view:*)",
+      "Bash(npm start)",
+      "Bash(timeout:*)",
+      "Bash(where:*)",
+      "Bash(npm install:*)",
+      "Bash(ping:*)",
+      "Bash(npm show:*)",
+      "Bash(npm uninstall:*)",
+      "Bash(powershell:*)",
+      "Bash(start powershell -ExecutionPolicy Bypass -File \"c:\\\\Tools\\\\clawdbot-tray\\\\config-gui.ps1\")",
+      "Bash(node:*)",
+      "WebFetch(domain:docs.openclaw.ai)",
+      "Bash(del \"c:\\\\Tools\\\\clawdbot-tray\\\\test-auth.js\")",
+      "Bash(tasklist:*)",
+      "Bash(findstr:*)",
+      "Bash(curl:*)",
+      "WebFetch(domain:100.95.182.88)",
+      "Bash(dir:*)",
+      "Bash(taskkill:*)",
+      "Bash(cmd //c \"cd /d %TEMP% && mkdir screenCapture 2>nul & copy /Y \"\"c:\\\\Tools\\\\clawdbot-tray\\\\node_modules\\\\screenshot-desktop\\\\lib\\\\win32\\\\screenCapture_1.3.2.bat\"\" screenCapture\\\\ & copy /Y \"\"c:\\\\Tools\\\\clawdbot-tray\\\\node_modules\\\\screenshot-desktop\\\\lib\\\\win32\\\\app.manifest\"\" screenCapture\\\\ & cd screenCapture & screenCapture_1.3.2.bat /h\")",
+      "Bash(git init:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}
