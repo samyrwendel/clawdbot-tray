@@ -52,26 +52,18 @@ const clipboardWrite = (text) => new Promise((resolve, reject) => {
 });
 
 // Camera via ffmpeg (Windows DirectShow)
+const FFMPEG_PATH = 'C:\\Users\\samyr\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-8.0.1-full_build\\bin\\ffmpeg.exe';
+
 const listCameras = () => new Promise((resolve, reject) => {
-    exec('ffmpeg -list_devices true -f dshow -i dummy 2>&1', { encoding: 'utf8' }, (err, stdout, stderr) => {
+    exec(`"${FFMPEG_PATH}" -list_devices true -f dshow -i dummy 2>&1`, { encoding: 'utf8' }, (err, stdout, stderr) => {
         const output = stdout || stderr || '';
         const cameras = [];
         const lines = output.split('\n');
-        let isVideo = false;
         for (const line of lines) {
-            if (line.includes('DirectShow video devices')) {
-                isVideo = true;
-                continue;
-            }
-            if (line.includes('DirectShow audio devices')) {
-                isVideo = false;
-                continue;
-            }
-            if (isVideo) {
-                const match = line.match(/"([^"]+)"/);
-                if (match && !line.includes('Alternative name')) {
-                    cameras.push({ name: match[1], index: cameras.length });
-                }
+            // Match lines like: [dshow @ ...] "Camera Name" (video)
+            const match = line.match(/\[dshow @.*?\]\s*"([^"]+)"\s*\(video\)/);
+            if (match) {
+                cameras.push({ name: match[1], index: cameras.length });
             }
         }
         resolve({ cameras });
@@ -81,7 +73,7 @@ const listCameras = () => new Promise((resolve, reject) => {
 const captureCamera = (params = {}) => new Promise((resolve, reject) => {
     const cameraName = params.camera || 'Integrated Camera';
     const tempFile = path.join(os.tmpdir(), `camera_${Date.now()}.jpg`);
-    const cmd = `ffmpeg -f dshow -i video="${cameraName}" -frames:v 1 -y "${tempFile}" 2>&1`;
+    const cmd = `"${FFMPEG_PATH}" -f dshow -i video="${cameraName}" -frames:v 1 -y "${tempFile}" 2>&1`;
     exec(cmd, { timeout: 10000, windowsHide: true }, (err, stdout, stderr) => {
         if (err && !fs.existsSync(tempFile)) {
             reject(new Error(`Camera capture failed: ${err.message}`));
@@ -106,7 +98,7 @@ const recordClip = (params = {}) => new Promise((resolve, reject) => {
     const cameraName = params.camera || 'Integrated Camera';
     const duration = Math.min(params.duration || 5, 30); // max 30s
     const tempFile = path.join(os.tmpdir(), `clip_${Date.now()}.mp4`);
-    const cmd = `ffmpeg -f dshow -i video="${cameraName}" -t ${duration} -c:v libx264 -preset ultrafast -y "${tempFile}" 2>&1`;
+    const cmd = `"${FFMPEG_PATH}" -f dshow -i video="${cameraName}" -t ${duration} -c:v libx264 -preset ultrafast -y "${tempFile}" 2>&1`;
     exec(cmd, { timeout: (duration + 10) * 1000, windowsHide: true }, (err) => {
         if (err && !fs.existsSync(tempFile)) {
             reject(new Error(`Clip recording failed: ${err.message}`));
@@ -923,6 +915,33 @@ function startBrowserControlServer() {
                     } catch (screenErr) {
                         log(`Screenshot error: ${screenErr.message}`);
                         result = { error: screenErr.message };
+                    }
+                    break;
+
+                case '/camera/list':
+                    try {
+                        result = await listCameras();
+                    } catch (camErr) {
+                        log(`Camera list error: ${camErr.message}`);
+                        result = { error: camErr.message };
+                    }
+                    break;
+
+                case '/camera/snap':
+                    try {
+                        result = await captureCamera(body);
+                    } catch (snapErr) {
+                        log(`Camera snap error: ${snapErr.message}`);
+                        result = { error: snapErr.message };
+                    }
+                    break;
+
+                case '/camera/clip':
+                    try {
+                        result = await recordClip(body);
+                    } catch (clipErr) {
+                        log(`Camera clip error: ${clipErr.message}`);
+                        result = { error: clipErr.message };
                     }
                     break;
 
