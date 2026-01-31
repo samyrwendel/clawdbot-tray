@@ -71,7 +71,9 @@ const listCameras = () => new Promise((resolve, reject) => {
 });
 
 const captureCamera = (params = {}) => new Promise((resolve, reject) => {
-    const cameraName = params.camera || 'Integrated Camera';
+    // Support multiple param names: camera, name, device
+    const cameraName = params.camera || params.name || params.device || 'HD Pro Webcam C920';
+    log(`captureCamera params: ${JSON.stringify(params)}, using camera: ${cameraName}`);
     const tempFile = path.join(os.tmpdir(), `camera_${Date.now()}.jpg`);
     const cmd = `"${FFMPEG_PATH}" -f dshow -i video="${cameraName}" -frames:v 1 -y "${tempFile}" 2>&1`;
     exec(cmd, { timeout: 10000, windowsHide: true }, (err, stdout, stderr) => {
@@ -95,7 +97,9 @@ const captureCamera = (params = {}) => new Promise((resolve, reject) => {
 });
 
 const recordClip = (params = {}) => new Promise((resolve, reject) => {
-    const cameraName = params.camera || 'Integrated Camera';
+    // Support multiple param names: camera, name, device
+    const cameraName = params.camera || params.name || params.device || 'HD Pro Webcam C920';
+    log(`recordClip params: ${JSON.stringify(params)}, using camera: ${cameraName}`);
     const duration = Math.min(params.duration || 5, 30); // max 30s
     const tempFile = path.join(os.tmpdir(), `clip_${Date.now()}.mp4`);
     const cmd = `"${FFMPEG_PATH}" -f dshow -i video="${cameraName}" -t ${duration} -c:v libx264 -preset ultrafast -y "${tempFile}" 2>&1`;
