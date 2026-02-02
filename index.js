@@ -320,7 +320,7 @@ function getIcon() {
             return fs.readFileSync(icoPath).toString('base64');
         }
     } catch (e) {
-        console.error('Erro ao ler Ã­cone:', e.message);
+        console.error('Erro ao ler ícone:', e.message);
     }
     // Fallback to embedded base64 icon
     return 'AAABAAEAEBAAAAEAIABoBAAAFgAAACgAAAAQAAAAIAAAAAEAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAgIAAgICAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAgIAA//8AAP//AACAgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAgIAA//8AAP//AAD//wAAgICAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgIAA//8AAP//AAD//wAA//8AAICAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgIAA//8AAP//AAD//wAA//8AAP//AACAgIAAAAAAAAAAAAAAAAAAAAAAAAAAAICAAP//AAD//wAA//8AAP//AAD//wAA//8AAICAAAAAAAAAAAAAAAAAAAAAAAAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AACAgAAAAAAAAAAAAAAAgIAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAAgIAAAAAAAACAgAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAAgIAAAAAAAICA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AACAAAAAAIAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAICAAAAAAAAAgP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AACAgAAAAAAAAACAgP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAICAgAAAAAAAAAAAAICAgP//AAD//wAA//8AAP//AAD//wAA//8AAP//AACAgIAAgIAAAAAAAAAAAAAAAACAgICAgIAAgICAAICAgACAgIAAgICAAICAgACAgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//8AAP//AADAAwAAwAMAAMADAADAAwAAwAMAAMADAADAAwAAwAMAAMADAADAAwAAwAMAAMADAAD//wAA//8AAA==';
@@ -379,7 +379,7 @@ function setStartupEnabled(enabled) {
             });
         } else {
             exec(`reg delete "${STARTUP_REG_KEY}" /v "${STARTUP_VALUE_NAME}" /f`, { windowsHide: true }, (err) => {
-                if (err && !err.message.includes('nÃ£o foi possÃ­vel localizar')) {
+                if (err && !err.message.includes('não foi possível localizar')) {
                     log(`Erro ao remover do startup: ${err.message}`);
                     reject(err);
                 } else {
@@ -423,7 +423,7 @@ async function getBrowser(options = {}) {
         ? options.headless
         : (config?.browser?.headless !== false);
 
-    // Se jÃ¡ existe um contexto com o mesmo profile, retorna
+    // Se já existe um contexto com o mesmo profile, retorna
     if (browserContext && currentProfile === profile) {
         return browserContext;
     }
@@ -439,7 +439,7 @@ async function getBrowser(options = {}) {
     try {
         const { chromium } = require('playwright-core');
 
-        // Cria diretÃ³rio do profile se nÃ£o existir
+        // Cria diretório do profile se não existir
         const userDataDir = path.join(PROFILES_DIR, profile, 'user-data');
         if (!fs.existsSync(userDataDir)) {
             fs.mkdirSync(userDataDir, { recursive: true });
@@ -467,7 +467,7 @@ async function getBrowser(options = {}) {
 
         log(`Launching persistent browser: profile=${profile}, headless=${headless}, userDataDir=${userDataDir}`);
 
-        // launchPersistentContext retorna um BrowserContext (nÃ£o Browser)
+        // launchPersistentContext retorna um BrowserContext (não Browser)
         browserContext = await chromium.launchPersistentContext(userDataDir, launchOptions);
         currentProfile = profile;
 
@@ -554,7 +554,7 @@ async function browserAction(action, params) {
 
                 await getBrowser({ profile, headless });
 
-                // Usa pÃ¡gina existente ou cria nova
+                // Usa página existente ou cria nova
                 const pages = browserContext.pages();
                 browserPage = pages[0] || await browserContext.newPage();
 
@@ -1850,7 +1850,7 @@ function disconnect(forReconnect = false) {
     }
     connected = false;
     updateTrayStatus();
-    // SÃ³ escreve "disconnected" se nÃ£o for para reconectar
+    // Só escreve "disconnected" se não for para reconectar
     if (!forReconnect) {
         writeStatus('disconnected', 'Desconectado manualmente');
     }
@@ -1864,15 +1864,15 @@ function updateTrayStatus(state) {
     let statusText, canConnect, canDisconnect;
 
     if (state === 'connecting') {
-        statusText = 'ðŸŸ¡ Conectando...';
+        statusText = '🟡 Conectando...';
         canConnect = false;
         canDisconnect = true;
     } else if (connected) {
-        statusText = 'ðŸŸ¢ Conectado';
+        statusText = '🟢 Conectado';
         canConnect = false;
         canDisconnect = true;
     } else {
-        statusText = `âšª ${lastStatus}`;
+        statusText = `⚪ ${lastStatus}`;
         canConnect = true;
         canDisconnect = false;
     }
@@ -1884,12 +1884,12 @@ function updateTrayStatus(state) {
     });
     systray.sendAction({
         type: 'update-item',
-        item: { title: 'â–¶ï¸ Conectar', enabled: canConnect },
+        item: { title: '▶️ Conectar', enabled: canConnect },
         seq_id: 2
     });
     systray.sendAction({
         type: 'update-item',
-        item: { title: 'â¹ï¸ Desconectar', enabled: canDisconnect },
+        item: { title: '⏹️ Desconectar', enabled: canDisconnect },
         seq_id: 3
     });
 }
@@ -1921,17 +1921,17 @@ function checkSingleInstance() {
             // Verifica se o processo ainda existe
             try {
                 process.kill(parseInt(pid), 0);
-                // Processo existe - outra instÃ¢ncia rodando
-                console.log('Outra instÃ¢ncia jÃ¡ estÃ¡ rodando (PID: ' + pid + ')');
+                // Processo existe - outra instância rodando
+                console.log('Outra instância já está rodando (PID: ' + pid + ')');
                 process.exit(1);
             } catch (e) {
-                // Processo nÃ£o existe - lock Ã³rfÃ£o, podemos continuar
+                // Processo não existe - lock órfão, podemos continuar
             }
         }
         // Cria novo lock
         fs.writeFileSync(LOCK_PATH, process.pid.toString());
     } catch (e) {
-        console.error('Erro ao verificar instÃ¢ncia:', e.message);
+        console.error('Erro ao verificar instância:', e.message);
     }
 }
 
@@ -1969,14 +1969,14 @@ async function main() {
             title: '',
             tooltip: `Clawd Node - ${config?.nodeName || 'Windows'}`,
             items: [
-                { title: 'ðŸ¦€ Clawd Node', enabled: false },
-                { title: 'âšª Desconectado', enabled: false },
-                { title: 'â–¶ï¸ Conectar', enabled: false },  // Desabilitado pois auto-conecta
-                { title: 'â¹ï¸ Desconectar', enabled: false },
-                { title: 'âš™ï¸ ConfiguraÃ§Ãµes', enabled: true },
-                { title: 'ðŸ“‹ Logs', enabled: true },
-                { title: startupEnabled ? 'âœ… Iniciar com Windows' : 'â¬œ Iniciar com Windows', enabled: true },
-                { title: 'âŒ Sair', enabled: true }
+                { title: '🦀 Clawd Node', enabled: false },
+                { title: '⚪ Desconectado', enabled: false },
+                { title: '▶️ Conectar', enabled: false },  // Desabilitado pois auto-conecta
+                { title: '⏹️ Desconectar', enabled: false },
+                { title: '⚙️ Configurações', enabled: true },
+                { title: '📋 Logs', enabled: true },
+                { title: startupEnabled ? '✅ Iniciar com Windows' : '⬜ Iniciar com Windows', enabled: true },
+                { title: '❌ Sair', enabled: true }
             ]
         }
     });
@@ -1993,10 +1993,10 @@ async function main() {
                     const nowEnabled = await toggleStartup();
                     systray.sendAction({
                         type: 'update-item',
-                        item: { title: nowEnabled ? 'âœ… Iniciar com Windows' : 'â¬œ Iniciar com Windows', enabled: true },
+                        item: { title: nowEnabled ? '✅ Iniciar com Windows' : '⬜ Iniciar com Windows', enabled: true },
                         seq_id: 6
                     });
-                    notify('Clawd Node', nowEnabled ? 'IniciarÃ¡ com o Windows' : 'NÃ£o iniciarÃ¡ com o Windows');
+                    notify('Clawd Node', nowEnabled ? 'Iniciará com o Windows' : 'Não iniciará com o Windows');
                 } catch (err) {
                     notify('Clawd Node', `Erro: ${err.message}`);
                 }
@@ -2014,8 +2014,8 @@ async function main() {
     });
 
     log('Clawd Node iniciado');
-    log(`Node ID: ${config?.nodeId || 'nÃ£o configurado'}`);
-    log(`Gateway: ${config?.gatewayUrl || 'nÃ£o configurado'}`);
+    log(`Node ID: ${config?.nodeId || 'não configurado'}`);
+    log(`Gateway: ${config?.gatewayUrl || 'não configurado'}`);
 
     // Watch config file for changes
     let configWatchTimeout = null;
