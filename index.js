@@ -1,16 +1,54 @@
-const { spawn, exec } = require('child_process');
+﻿const childProcess = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const http = require('http');
 const WebSocket = require('ws');
+
+// Patch spawn for pkg compatibility - redirect snapshot paths to real paths
+if (process.pkg) {
+    const originalSpawn = childProcess.spawn;
+    childProcess.spawn = function(cmd, args, opts) {
+        if (cmd && typeof cmd === 'string' && cmd.includes('\\snapshot\\')) {
+            const realPath = cmd.replace(/C:\\snapshot\\clawdbot-tray\\node_modules/g,
+                path.join(path.dirname(process.execPath), 'node_modules'));
+            if (fs.existsSync(realPath)) {
+                cmd = realPath;
+            }
+        }
+        return originalSpawn.call(this, cmd, args, opts);
+    };
+}
+
+const { spawn, exec } = childProcess;
 const SysTray = require('systray2').default;
-const sharp = require('sharp');
 const notifier = require('node-notifier');
-// Screenshot via PowerShell (more reliable on Windows than screenshot-desktop)
-const captureScreen = () => new Promise((resolve, reject) => {
-    const tempFile = path.join(os.tmpdir(), `screenshot_${Date.now()}.png`);
+
+// Get image dimensions using PowerShell (replaces sharp)
+const getImageDimensions = (imageBuffer) => new Promise((resolve) => {
+    const tempFile = path.join(os.tmpdir(), `img_${Date.now()}.tmp`);
+    fs.writeFileSync(tempFile, imageBuffer);
+    const ps = `
+Add-Type -AssemblyName System.Drawing;
+$img = [System.Drawing.Image]::FromFile('${tempFile.replace(/\\/g, '\\\\')}');
+Write-Output "$($img.Width),$($img.Height)";
+$img.Dispose();
+`;
+    exec(`powershell -Command "${ps.replace(/\n/g, ' ')}"`, { windowsHide: true }, (err, stdout) => {
+        fs.unlink(tempFile, () => {});
+        if (err || !stdout.trim()) {
+            resolve({ width: 0, height: 0 });
+        } else {
+            const [width, height] = stdout.trim().split(',').map(Number);
+            resolve({ width: width || 0, height: height || 0 });
+        }
+    });
+});
+// Screenshot via PowerShell - captures as JPEG for smaller size
+const captureScreen = (options = {}) => new Promise((resolve, reject) => {
+    const quality = options.quality || 70; // JPEG quality (1-100)
+    const tempFile = path.join(os.tmpdir(), `screenshot_${Date.now()}.jpg`);
     const ps = `
 Add-Type -AssemblyName System.Windows.Forms;
 Add-Type -AssemblyName System.Drawing;
@@ -18,7 +56,10 @@ $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds;
 $bitmap = New-Object System.Drawing.Bitmap($screen.Width, $screen.Height);
 $graphics = [System.Drawing.Graphics]::FromImage($bitmap);
 $graphics.CopyFromScreen($screen.X, $screen.Y, 0, 0, $bitmap.Size);
-$bitmap.Save('${tempFile.replace(/\\/g, '\\\\')}', [System.Drawing.Imaging.ImageFormat]::Png);
+$encoder = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' };
+$encoderParams = New-Object System.Drawing.Imaging.EncoderParameters(1);
+$encoderParams.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, ${quality});
+$bitmap.Save('${tempFile.replace(/\\/g, '\\\\')}', $encoder, $encoderParams);
 $graphics.Dispose();
 $bitmap.Dispose()
 `;
@@ -34,6 +75,9 @@ $bitmap.Dispose()
         });
     });
 });
+
+// Maximum payload size for WebSocket (256KB to be safe with 1009 limit)
+const MAX_PAYLOAD_SIZE = 256 * 1024;
 
 // Clipboard via PowerShell (works on Windows without ESM issues)
 const clipboardRead = () => new Promise((resolve, reject) => {
@@ -76,23 +120,27 @@ const captureCamera = (params = {}) => new Promise((resolve, reject) => {
     log(`captureCamera params: ${JSON.stringify(params)}, using camera: ${cameraName}`);
     const tempFile = path.join(os.tmpdir(), `camera_${Date.now()}.jpg`);
     const cmd = `"${FFMPEG_PATH}" -f dshow -i video="${cameraName}" -frames:v 1 -y "${tempFile}" 2>&1`;
-    exec(cmd, { timeout: 10000, windowsHide: true }, (err, stdout, stderr) => {
+    exec(cmd, { timeout: 10000, windowsHide: true }, async (err, stdout, stderr) => {
         if (err && !fs.existsSync(tempFile)) {
             reject(new Error(`Camera capture failed: ${err.message}`));
             return;
         }
-        fs.readFile(tempFile, (readErr, data) => {
+        try {
+            const data = fs.readFileSync(tempFile);
             fs.unlink(tempFile, () => {});
-            if (readErr) {
-                reject(readErr);
-            } else {
-                resolve({
-                    base64: data.toString('base64'),
-                    format: 'jpg',
-                    size: data.length,
-                });
-            }
-        });
+            // Get image dimensions using PowerShell
+            const dims = await getImageDimensions(data);
+            resolve({
+                base64: data.toString('base64'),
+                format: 'jpg',
+                size: data.length,
+                width: dims.width,
+                height: dims.height,
+            });
+        } catch (readErr) {
+            fs.unlink(tempFile, () => {});
+            reject(readErr);
+        }
     });
 });
 
@@ -124,13 +172,15 @@ const recordClip = (params = {}) => new Promise((resolve, reject) => {
     });
 });
 
+// Base directory: use executable dir for pkg, __dirname otherwise
+const BASE_DIR = process.pkg ? path.dirname(process.execPath) : __dirname;
+
 // Paths
-const CONFIG_PATH = path.join(__dirname, 'config.json');
-const LOG_PATH = path.join(__dirname, 'log.txt');
-const SVG_PATH = path.join(__dirname, 'favicon.svg');
-const CONFIG_GUI_PATH = path.join(__dirname, 'config-gui.ps1');
-const LOCK_PATH = path.join(__dirname, '.lock');
-const STATUS_PATH = path.join(__dirname, 'status.txt');
+const CONFIG_PATH = path.join(BASE_DIR, 'config.json');
+const LOG_PATH = path.join(BASE_DIR, 'log.txt');
+const CONFIG_GUI_PATH = path.join(BASE_DIR, 'config-gui.ps1');
+const LOCK_PATH = path.join(BASE_DIR, '.lock');
+const STATUS_PATH = path.join(BASE_DIR, 'status.txt');
 const IDENTITY_PATH = path.join(os.homedir(), '.clawdbot', 'identity', 'device.json');
 const PROFILES_DIR = path.join(os.homedir(), '.clawdbot', 'browser');
 
@@ -262,37 +312,17 @@ function writeStatus(status, details = '') {
 }
 
 // ============== ICON ==============
-function pngToIco(pngBuffer) {
-    const iconDir = Buffer.alloc(6);
-    iconDir.writeUInt16LE(0, 0);
-    iconDir.writeUInt16LE(1, 2);
-    iconDir.writeUInt16LE(1, 4);
-
-    const iconEntry = Buffer.alloc(16);
-    iconEntry.writeUInt8(0, 0);
-    iconEntry.writeUInt8(0, 1);
-    iconEntry.writeUInt8(0, 2);
-    iconEntry.writeUInt8(0, 3);
-    iconEntry.writeUInt16LE(1, 4);
-    iconEntry.writeUInt16LE(32, 6);
-    iconEntry.writeUInt32LE(pngBuffer.length, 8);
-    iconEntry.writeUInt32LE(22, 12);
-
-    return Buffer.concat([iconDir, iconEntry, pngBuffer]);
-}
-
-async function getIcon() {
+function getIcon() {
+    // Try to read icon.ico directly
+    const icoPath = path.join(BASE_DIR, 'icon.ico');
     try {
-        if (fs.existsSync(SVG_PATH)) {
-            const pngBuffer = await sharp(SVG_PATH)
-                .resize(64, 64)
-                .png()
-                .toBuffer();
-            return pngToIco(pngBuffer).toString('base64');
+        if (fs.existsSync(icoPath)) {
+            return fs.readFileSync(icoPath).toString('base64');
         }
     } catch (e) {
-        console.error('Erro ao converter ícone:', e.message);
+        console.error('Erro ao ler Ã­cone:', e.message);
     }
+    // Fallback to embedded base64 icon
     return 'AAABAAEAEBAAAAEAIABoBAAAFgAAACgAAAAQAAAAIAAAAAEAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAgIAAgICAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAgIAA//8AAP//AACAgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAgIAA//8AAP//AAD//wAAgICAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgIAA//8AAP//AAD//wAA//8AAICAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgIAA//8AAP//AAD//wAA//8AAP//AACAgIAAAAAAAAAAAAAAAAAAAAAAAAAAAICAAP//AAD//wAA//8AAP//AAD//wAA//8AAICAAAAAAAAAAAAAAAAAAAAAAAAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AACAgAAAAAAAAAAAAAAAgIAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAAgIAAAAAAAACAgAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAAgIAAAAAAAICA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AACAAAAAAIAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAICAAAAAAAAAgP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AACAgAAAAAAAAACAgP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAICAgAAAAAAAAAAAAICAgP//AAD//wAA//8AAP//AAD//wAA//8AAP//AACAgIAAgIAAAAAAAAAAAAAAAACAgICAgIAAgICAAICAgACAgIAAgICAAICAgACAgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//8AAP//AADAAwAAwAMAAMADAADAAwAAwAMAAMADAADAAwAAwAMAAMADAADAAwAAwAMAAMADAAD//wAA//8AAA==';
 }
 
@@ -317,6 +347,54 @@ function notify(title, message) {
         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Clawd").Show($toast)
     `;
     exec(`powershell -Command "${ps.replace(/\n/g, ' ')}"`, { windowsHide: true });
+}
+
+// ============== STARTUP WITH WINDOWS ==============
+const STARTUP_REG_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
+const STARTUP_VALUE_NAME = 'ClawdNode';
+
+function isStartupEnabled() {
+    return new Promise((resolve) => {
+        exec(`reg query "${STARTUP_REG_KEY}" /v "${STARTUP_VALUE_NAME}"`, { windowsHide: true }, (err, stdout) => {
+            resolve(!err && stdout.includes(STARTUP_VALUE_NAME));
+        });
+    });
+}
+
+function setStartupEnabled(enabled) {
+    return new Promise((resolve, reject) => {
+        if (enabled) {
+            // Get the path to the current executable
+            const exePath = process.execPath;
+            const scriptPath = path.resolve(__dirname, 'index.js');
+            const cmd = `reg add "${STARTUP_REG_KEY}" /v "${STARTUP_VALUE_NAME}" /t REG_SZ /d "\\"${exePath}\\" \\"${scriptPath}\\"" /f`;
+            exec(cmd, { windowsHide: true }, (err) => {
+                if (err) {
+                    log(`Erro ao adicionar ao startup: ${err.message}`);
+                    reject(err);
+                } else {
+                    log('Adicionado ao startup do Windows');
+                    resolve(true);
+                }
+            });
+        } else {
+            exec(`reg delete "${STARTUP_REG_KEY}" /v "${STARTUP_VALUE_NAME}" /f`, { windowsHide: true }, (err) => {
+                if (err && !err.message.includes('nÃ£o foi possÃ­vel localizar')) {
+                    log(`Erro ao remover do startup: ${err.message}`);
+                    reject(err);
+                } else {
+                    log('Removido do startup do Windows');
+                    resolve(false);
+                }
+            });
+        }
+    });
+}
+
+async function toggleStartup() {
+    const currentlyEnabled = await isStartupEnabled();
+    await setStartupEnabled(!currentlyEnabled);
+    return !currentlyEnabled;
 }
 
 // ============== SHELL EXECUTION ==============
@@ -345,7 +423,7 @@ async function getBrowser(options = {}) {
         ? options.headless
         : (config?.browser?.headless !== false);
 
-    // Se já existe um contexto com o mesmo profile, retorna
+    // Se jÃ¡ existe um contexto com o mesmo profile, retorna
     if (browserContext && currentProfile === profile) {
         return browserContext;
     }
@@ -361,7 +439,7 @@ async function getBrowser(options = {}) {
     try {
         const { chromium } = require('playwright-core');
 
-        // Cria diretório do profile se não existir
+        // Cria diretÃ³rio do profile se nÃ£o existir
         const userDataDir = path.join(PROFILES_DIR, profile, 'user-data');
         if (!fs.existsSync(userDataDir)) {
             fs.mkdirSync(userDataDir, { recursive: true });
@@ -373,14 +451,23 @@ async function getBrowser(options = {}) {
             channel: 'chrome',
             args: [
                 '--enable-extensions',
-                '--disable-component-extensions-with-background-pages=false'
+                '--disable-component-extensions-with-background-pages=false',
+                '--disable-blink-features=AutomationControlled',  // Hide automation banner
+                '--disable-infobars',  // Disable info bars
+                '--no-first-run',
+                '--no-default-browser-check',
+                '--disable-popup-blocking',
+                '--disable-features=ExtensionsToolbarMenu',
             ],
-            ignoreDefaultArgs: ['--disable-extensions'],
+            ignoreDefaultArgs: [
+                '--disable-extensions',
+                '--enable-automation',  // Don't show "controlled by automation" bar
+            ],
         };
 
         log(`Launching persistent browser: profile=${profile}, headless=${headless}, userDataDir=${userDataDir}`);
 
-        // launchPersistentContext retorna um BrowserContext (não Browser)
+        // launchPersistentContext retorna um BrowserContext (nÃ£o Browser)
         browserContext = await chromium.launchPersistentContext(userDataDir, launchOptions);
         currentProfile = profile;
 
@@ -462,11 +549,12 @@ async function browserAction(action, params) {
             case 'start': {
                 // Start browser session with persistent profile
                 const profile = params?.profile || 'clawd';
-                const headless = params?.headless !== false;
+                // Use params.headless if provided, otherwise use config (default: false = visible)
+                const headless = params?.headless ?? config?.browser?.headless ?? false;
 
                 await getBrowser({ profile, headless });
 
-                // Usa página existente ou cria nova
+                // Usa pÃ¡gina existente ou cria nova
                 const pages = browserContext.pages();
                 browserPage = pages[0] || await browserContext.newPage();
 
@@ -910,11 +998,14 @@ function startBrowserControlServer() {
 
                 case '/screen':
                     try {
-                        const imgBuffer = await captureScreen();
+                        const imgBuffer = await captureScreen({ quality: 70 });
+                        const imgDims = await getImageDimensions(imgBuffer);
                         result = {
                             base64: imgBuffer.toString('base64'),
-                            format: 'png',
+                            format: 'jpg',
                             size: imgBuffer.length,
+                            width: imgDims.width,
+                            height: imgDims.height,
                         };
                     } catch (screenErr) {
                         log(`Screenshot error: ${screenErr.message}`);
@@ -1401,14 +1492,31 @@ async function handleNodeInvoke(payload) {
 
             case 'browser.proxy':
                 // Log full params to see what gateway sends
-                log(`browser.proxy params: ${JSON.stringify(params)}`);
+                log(`browser.proxy FULL params: ${JSON.stringify(params)}`);
+                log(`browser.proxy paramsJSON raw: ${paramsJSON}`);
 
-                // Gateway sends: { method: 'GET', path: '/', body: {...} }
-                // GET / = status
-                // POST / with { action: 'start' } = other actions
-                const proxyMethod = params?.method || 'GET';
-                const proxyPath = params?.path || '/';
-                const proxyBody = params?.body || {};
+                // Gateway may send params directly or nested
+                // Try to detect the format
+                let proxyMethod, proxyPath, proxyBody;
+
+                if (params?.method && params?.path) {
+                    // Format: { method: 'GET', path: '/', body: {...} }
+                    proxyMethod = params.method;
+                    proxyPath = params.path;
+                    proxyBody = params.body || {};
+                } else if (params?.action) {
+                    // Format: { action: 'status' } or { action: 'open', url: '...' }
+                    proxyMethod = 'POST';
+                    proxyPath = `/${params.action}`;
+                    proxyBody = params;
+                } else {
+                    // Default to status
+                    proxyMethod = 'GET';
+                    proxyPath = '/';
+                    proxyBody = params || {};
+                }
+
+                log(`browser.proxy parsed: method=${proxyMethod}, path=${proxyPath}, body=${JSON.stringify(proxyBody)}`);
 
                 let action;
                 let actionParams = proxyBody;
@@ -1512,12 +1620,33 @@ async function handleNodeInvoke(payload) {
 
             case 'screen.capture':
                 try {
-                    const screenImg = await captureScreen();
-                    sendNodeInvokeResult(id, nodeId, true, {
-                        base64: screenImg.toString('base64'),
-                        format: 'png',
-                        size: screenImg.length,
-                    });
+                    const screenImg = await captureScreen({ quality: 70 });
+                    const screenDims = await getImageDimensions(screenImg);
+                    const screenBase64 = screenImg.toString('base64');
+                    log(`Screenshot captured: ${screenImg.length} bytes, base64: ${screenBase64.length} chars`);
+
+                    // Check if payload would be too large
+                    if (screenBase64.length > MAX_PAYLOAD_SIZE) {
+                        log(`Screenshot too large (${screenBase64.length} > ${MAX_PAYLOAD_SIZE}), saving to file`);
+                        const screenshotPath = path.join(os.tmpdir(), `clawd_screenshot_${Date.now()}.jpg`);
+                        fs.writeFileSync(screenshotPath, screenImg);
+                        sendNodeInvokeResult(id, nodeId, true, {
+                            path: screenshotPath,
+                            format: 'jpg',
+                            size: screenImg.length,
+                            width: screenDims.width,
+                            height: screenDims.height,
+                            note: 'Image saved to file (too large for WebSocket)',
+                        });
+                    } else {
+                        sendNodeInvokeResult(id, nodeId, true, {
+                            base64: screenBase64,
+                            format: 'jpg',
+                            size: screenImg.length,
+                            width: screenDims.width,
+                            height: screenDims.height,
+                        });
+                    }
                 } catch (screenErr) {
                     log(`Screenshot error: ${screenErr.message}`);
                     sendNodeInvokeResult(id, nodeId, false, null, { code: 'ERROR', message: screenErr.message });
@@ -1572,7 +1701,7 @@ function sendNodeInvokeResult(id, nodeId, ok, payload, error) {
         ok,
     };
     if (payload !== null && payload !== undefined) {
-        result.payloadJSON = JSON.stringify(payload);
+        result.payloadJSON = JSON.stringify({ result: payload });
         log(`payloadJSON length: ${result.payloadJSON.length}`);
     } else {
         log(`WARNING: payload is ${payload}`);
@@ -1626,12 +1755,32 @@ async function handleInvoke(id, method, params) {
 
             case 'screen.capture':
                 try {
-                    const screenBuf = await captureScreen();
-                    send({ type: 'invoke-res', id, ok: true, payload: {
-                        base64: screenBuf.toString('base64'),
-                        format: 'png',
-                        size: screenBuf.length,
-                    }});
+                    const screenBuf = await captureScreen({ quality: 70 });
+                    const screenDims = await getImageDimensions(screenBuf);
+                    const screenB64 = screenBuf.toString('base64');
+
+                    // Check if payload would be too large
+                    if (screenB64.length > MAX_PAYLOAD_SIZE) {
+                        log(`Screenshot too large (${screenB64.length}), saving to file`);
+                        const ssPath = path.join(os.tmpdir(), `clawd_screenshot_${Date.now()}.jpg`);
+                        fs.writeFileSync(ssPath, screenBuf);
+                        send({ type: 'invoke-res', id, ok: true, payload: {
+                            path: ssPath,
+                            format: 'jpg',
+                            size: screenBuf.length,
+                            width: screenDims.width,
+                            height: screenDims.height,
+                            note: 'Image saved to file (too large for WebSocket)',
+                        }});
+                    } else {
+                        send({ type: 'invoke-res', id, ok: true, payload: {
+                            base64: screenB64,
+                            format: 'jpg',
+                            size: screenBuf.length,
+                            width: screenDims.width,
+                            height: screenDims.height,
+                        }});
+                    }
                 } catch (screenErr) {
                     log(`Screenshot error: ${screenErr.message}`);
                     send({ type: 'invoke-res', id, ok: false, error: screenErr.message });
@@ -1701,7 +1850,7 @@ function disconnect(forReconnect = false) {
     }
     connected = false;
     updateTrayStatus();
-    // Só escreve "disconnected" se não for para reconectar
+    // SÃ³ escreve "disconnected" se nÃ£o for para reconectar
     if (!forReconnect) {
         writeStatus('disconnected', 'Desconectado manualmente');
     }
@@ -1715,15 +1864,15 @@ function updateTrayStatus(state) {
     let statusText, canConnect, canDisconnect;
 
     if (state === 'connecting') {
-        statusText = '🟡 Conectando...';
+        statusText = 'ðŸŸ¡ Conectando...';
         canConnect = false;
         canDisconnect = true;
     } else if (connected) {
-        statusText = '🟢 Conectado';
+        statusText = 'ðŸŸ¢ Conectado';
         canConnect = false;
         canDisconnect = true;
     } else {
-        statusText = `⚪ ${lastStatus}`;
+        statusText = `âšª ${lastStatus}`;
         canConnect = true;
         canDisconnect = false;
     }
@@ -1735,12 +1884,12 @@ function updateTrayStatus(state) {
     });
     systray.sendAction({
         type: 'update-item',
-        item: { title: '▶️ Conectar', enabled: canConnect },
+        item: { title: 'â–¶ï¸ Conectar', enabled: canConnect },
         seq_id: 2
     });
     systray.sendAction({
         type: 'update-item',
-        item: { title: '⏹️ Desconectar', enabled: canDisconnect },
+        item: { title: 'â¹ï¸ Desconectar', enabled: canDisconnect },
         seq_id: 3
     });
 }
@@ -1772,17 +1921,17 @@ function checkSingleInstance() {
             // Verifica se o processo ainda existe
             try {
                 process.kill(parseInt(pid), 0);
-                // Processo existe - outra instância rodando
-                console.log('Outra instância já está rodando (PID: ' + pid + ')');
+                // Processo existe - outra instÃ¢ncia rodando
+                console.log('Outra instÃ¢ncia jÃ¡ estÃ¡ rodando (PID: ' + pid + ')');
                 process.exit(1);
             } catch (e) {
-                // Processo não existe - lock órfão, podemos continuar
+                // Processo nÃ£o existe - lock Ã³rfÃ£o, podemos continuar
             }
         }
         // Cria novo lock
         fs.writeFileSync(LOCK_PATH, process.pid.toString());
     } catch (e) {
-        console.error('Erro ao verificar instância:', e.message);
+        console.error('Erro ao verificar instÃ¢ncia:', e.message);
     }
 }
 
@@ -1811,30 +1960,48 @@ async function main() {
 
     const icon = await getIcon();
 
+    // Check if startup is enabled
+    const startupEnabled = await isStartupEnabled();
+
     systray = new SysTray({
         menu: {
             icon,
             title: '',
             tooltip: `Clawd Node - ${config?.nodeName || 'Windows'}`,
             items: [
-                { title: '🦀 Clawd Node', enabled: false },
-                { title: '⚪ Desconectado', enabled: false },
-                { title: '▶️ Conectar', enabled: false },  // Desabilitado pois auto-conecta
-                { title: '⏹️ Desconectar', enabled: false },
-                { title: '⚙️ Configurações', enabled: true },
-                { title: '📋 Logs', enabled: true },
-                { title: '❌ Sair', enabled: true }
+                { title: 'ðŸ¦€ Clawd Node', enabled: false },
+                { title: 'âšª Desconectado', enabled: false },
+                { title: 'â–¶ï¸ Conectar', enabled: false },  // Desabilitado pois auto-conecta
+                { title: 'â¹ï¸ Desconectar', enabled: false },
+                { title: 'âš™ï¸ ConfiguraÃ§Ãµes', enabled: true },
+                { title: 'ðŸ“‹ Logs', enabled: true },
+                { title: startupEnabled ? 'âœ… Iniciar com Windows' : 'â¬œ Iniciar com Windows', enabled: true },
+                { title: 'âŒ Sair', enabled: true }
             ]
         }
     });
 
-    systray.onClick(a => {
+    systray.onClick(async (a) => {
         switch(a.seq_id) {
             case 2: connect(); break;
             case 3: disconnect(); break;
             case 4: openConfig(); break;
             case 5: openLogs(); break;
             case 6:
+                // Toggle startup with Windows
+                try {
+                    const nowEnabled = await toggleStartup();
+                    systray.sendAction({
+                        type: 'update-item',
+                        item: { title: nowEnabled ? 'âœ… Iniciar com Windows' : 'â¬œ Iniciar com Windows', enabled: true },
+                        seq_id: 6
+                    });
+                    notify('Clawd Node', nowEnabled ? 'IniciarÃ¡ com o Windows' : 'NÃ£o iniciarÃ¡ com o Windows');
+                } catch (err) {
+                    notify('Clawd Node', `Erro: ${err.message}`);
+                }
+                break;
+            case 7:
                 disconnect();
                 stopBrowserControlServer();
                 closeBrowser().finally(() => {
@@ -1847,8 +2014,8 @@ async function main() {
     });
 
     log('Clawd Node iniciado');
-    log(`Node ID: ${config?.nodeId || 'não configurado'}`);
-    log(`Gateway: ${config?.gatewayUrl || 'não configurado'}`);
+    log(`Node ID: ${config?.nodeId || 'nÃ£o configurado'}`);
+    log(`Gateway: ${config?.gatewayUrl || 'nÃ£o configurado'}`);
 
     // Watch config file for changes
     let configWatchTimeout = null;
@@ -1901,3 +2068,4 @@ main().catch(e => {
     console.error('Erro fatal:', e);
     process.exit(1);
 });
+

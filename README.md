@@ -39,8 +39,8 @@ Dependências principais:
 - `ws` - WebSocket client
 - `systray2` - System tray integration
 - `node-notifier` - Desktop notifications
-- `sharp` - Image processing
-- `tweetnacl` - Ed25519 cryptography
+- `playwright-core` - Browser automation
+- `screenshot-desktop` - Screenshots
 
 ### 3. Configurar o Gateway
 
@@ -158,13 +158,18 @@ curl -X POST http://localhost:18790/notify \
 clawdbot-tray/
 ├── index.js           # Código principal
 ├── package.json       # Dependências
+├── build.js           # Script de build do exe
 ├── config.json        # Configuração (criar manualmente)
-├── favicon.svg        # Ícone do tray (SVG)
-├── icon.ico           # Ícone para notificações
+├── icon.ico           # Ícone do tray e exe
 ├── log.txt            # Log de execução (auto-gerado)
 ├── status.txt         # Status atual (auto-gerado)
 ├── .lock              # Lock file (auto-gerado)
-└── .gitignore         # Arquivos ignorados
+├── .gitignore         # Arquivos ignorados
+└── dist/              # Build do executável (gerado por npm run build)
+    ├── ClawdNode.exe
+    ├── config.json
+    ├── icon.ico
+    └── node_modules/
 ```
 
 ### Identidade (auto-gerada)
@@ -262,6 +267,123 @@ Get-Clipboard  # Deve retornar conteúdo
 - Cada mensagem sensível é assinada
 - Pareamento requer aprovação explícita no Gateway
 - HTTP server escuta em 0.0.0.0 - restringir via firewall se necessário
+
+## Build do Executável (.exe)
+
+O projeto pode ser compilado para um executável Windows standalone usando `pkg`.
+
+### Pré-requisitos de Build
+
+```powershell
+npm install
+```
+
+DevDependencies:
+- `@yao-pkg/pkg` - Empacotador Node.js para executável
+- `rcedit` - Editar recursos do exe (ícone, metadados)
+
+### Gerar o Executável
+
+```powershell
+npm run build
+```
+
+O script `build.js` executa:
+1. **pkg** - Compila index.js para ClawdNode.exe (node18-win-x64)
+2. **Copia módulos nativos** - screenshot-desktop, systray2, node-notifier
+3. **Copia ícone** - icon.ico para a pasta dist
+4. **Copia config** - config.json para a pasta dist
+5. **Remove console** - Altera PE header (subsystem CONSOLE → WINDOWS)
+6. **Aplica ícone** - Usa rcedit para embutir icon.ico no exe
+7. **Adiciona metadados** - ProductName, Version, Company, etc.
+
+### Estrutura do Build
+
+```
+dist/
+├── ClawdNode.exe        # Executável principal (com ícone)
+├── ClawdNode-debug.bat  # Launcher com console (para debug)
+├── ClawdNode.vbs        # Launcher silencioso (alternativo)
+├── config.json          # Configuração
+├── icon.ico             # Ícone
+└── node_modules/        # Módulos nativos necessários
+    ├── screenshot-desktop/
+    ├── systray2/
+    └── node-notifier/
+```
+
+### Detalhes Técnicos do Build
+
+#### Paths no pkg
+O pkg usa `__dirname` virtual (`C:\snapshot\...`). O código detecta `process.pkg` e usa `path.dirname(process.execPath)` para paths reais:
+```javascript
+const BASE_DIR = process.pkg ? path.dirname(process.execPath) : __dirname;
+```
+
+#### Patch do spawn para systray2
+O systray2 precisa do binário `tray_windows_release.exe`. O código intercepta `child_process.spawn` para redirecionar paths do snapshot:
+```javascript
+if (process.pkg) {
+    const originalSpawn = childProcess.spawn;
+    childProcess.spawn = function(cmd, args, opts) {
+        if (cmd && cmd.includes('\\snapshot\\')) {
+            cmd = cmd.replace(/C:\\snapshot\\clawdbot-tray\\node_modules/g,
+                path.join(path.dirname(process.execPath), 'node_modules'));
+        }
+        return originalSpawn.call(this, cmd, args, opts);
+    };
+}
+```
+
+#### Remoção do Console
+O build modifica o PE header do exe para mudar o subsystem de CONSOLE (3) para WINDOWS (2):
+```javascript
+const exe = fs.readFileSync(exePath);
+const peOffset = exe.readUInt32LE(0x3C);
+const subsystemOffset = peOffset + 0x5C;
+exe.writeUInt16LE(2, subsystemOffset);  // 2 = WINDOWS/GUI
+fs.writeFileSync(exePath, exe);
+```
+
+#### Aplicar Ícone
+O rcedit é usado para embutir o ícone e metadados:
+```javascript
+await rcedit(exePath, {
+    icon: 'dist/icon.ico',
+    'version-string': {
+        ProductName: 'Clawd Node',
+        FileDescription: 'Clawd Node Agent for Windows',
+        CompanyName: 'Clawdbot',
+        OriginalFilename: 'ClawdNode.exe'
+    },
+    'file-version': '1.0.0',
+    'product-version': '1.0.0'
+});
+```
+
+### Distribuição
+
+Para distribuir:
+1. Compactar pasta `dist/` inteira em ZIP
+2. Usuário extrai e executa `ClawdNode.exe`
+3. O config.json deve estar na mesma pasta do exe
+
+### Atualização do Executável
+
+Ao fazer alterações no código:
+```powershell
+# 1. Editar index.js com as mudanças
+# 2. Testar com node
+node index.js
+
+# 3. Se OK, gerar novo exe
+npm run build
+
+# 4. Testar o exe
+dist\ClawdNode.exe
+```
+
+---
 
 ## Desenvolvimento
 
