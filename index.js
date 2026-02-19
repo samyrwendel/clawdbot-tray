@@ -1864,15 +1864,15 @@ function updateTrayStatus(state) {
     let statusText, canConnect, canDisconnect;
 
     if (state === 'connecting') {
-        statusText = '🟡 Conectando...';
+        statusText = 'Conectando...';
         canConnect = false;
         canDisconnect = true;
     } else if (connected) {
-        statusText = '🟢 Conectado';
+        statusText = 'Conectado';
         canConnect = false;
         canDisconnect = true;
     } else {
-        statusText = `⚪ ${lastStatus}`;
+        statusText = `${lastStatus}`;
         canConnect = true;
         canDisconnect = false;
     }
@@ -1884,12 +1884,12 @@ function updateTrayStatus(state) {
     });
     systray.sendAction({
         type: 'update-item',
-        item: { title: '▶️ Conectar', enabled: canConnect },
+        item: { title: 'Conectar', enabled: canConnect },
         seq_id: 2
     });
     systray.sendAction({
         type: 'update-item',
-        item: { title: '⏹️ Desconectar', enabled: canDisconnect },
+        item: { title: 'Desconectar', enabled: canDisconnect },
         seq_id: 3
     });
 }
@@ -1969,14 +1969,14 @@ async function main() {
             title: '',
             tooltip: `Clawd Node - ${config?.nodeName || 'Windows'}`,
             items: [
-                { title: '🦀 Clawd Node', enabled: false },
-                { title: '⚪ Desconectado', enabled: false },
-                { title: '▶️ Conectar', enabled: false },  // Desabilitado pois auto-conecta
-                { title: '⏹️ Desconectar', enabled: false },
-                { title: '⚙️ Configurações', enabled: true },
-                { title: '📋 Logs', enabled: true },
-                { title: startupEnabled ? '✅ Iniciar com Windows' : '⬜ Iniciar com Windows', enabled: true },
-                { title: '❌ Sair', enabled: true }
+                { title: 'Clawd Node', enabled: false },
+                { title: 'Desconectado', enabled: false },
+                { title: 'Conectar', enabled: false },  // Desabilitado pois auto-conecta
+                { title: 'Desconectar', enabled: false },
+                { title: 'Configuracoes', enabled: true },
+                { title: 'Logs', enabled: true },
+                { title: startupEnabled ? '[x] Iniciar com Windows' : '[ ] Iniciar com Windows', enabled: true },
+                { title: 'Sair', enabled: true }
             ]
         }
     });
@@ -1993,7 +1993,7 @@ async function main() {
                     const nowEnabled = await toggleStartup();
                     systray.sendAction({
                         type: 'update-item',
-                        item: { title: nowEnabled ? '✅ Iniciar com Windows' : '⬜ Iniciar com Windows', enabled: true },
+                        item: { title: nowEnabled ? '[x] Iniciar com Windows' : '[ ] Iniciar com Windows', enabled: true },
                         seq_id: 6
                     });
                     notify('Clawd Node', nowEnabled ? 'Iniciará com o Windows' : 'Não iniciará com o Windows');
