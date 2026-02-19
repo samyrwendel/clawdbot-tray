@@ -24,6 +24,7 @@ if (process.pkg) {
 const { spawn, exec } = childProcess;
 const SysTray = require('systray2').default;
 const notifier = require('node-notifier');
+const screenshot = require('screenshot-desktop');
 
 // Get image dimensions using PowerShell (replaces sharp)
 const getImageDimensions = (imageBuffer) => new Promise((resolve) => {
@@ -45,36 +46,13 @@ $img.Dispose();
         }
     });
 });
-// Screenshot via PowerShell - captures as JPEG for smaller size
-const captureScreen = (options = {}) => new Promise((resolve, reject) => {
-    const quality = options.quality || 70; // JPEG quality (1-100)
-    const tempFile = path.join(os.tmpdir(), `screenshot_${Date.now()}.jpg`);
-    const ps = `
-Add-Type -AssemblyName System.Windows.Forms;
-Add-Type -AssemblyName System.Drawing;
-$screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds;
-$bitmap = New-Object System.Drawing.Bitmap($screen.Width, $screen.Height);
-$graphics = [System.Drawing.Graphics]::FromImage($bitmap);
-$graphics.CopyFromScreen($screen.X, $screen.Y, 0, 0, $bitmap.Size);
-$encoder = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' };
-$encoderParams = New-Object System.Drawing.Imaging.EncoderParameters(1);
-$encoderParams.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, ${quality});
-$bitmap.Save('${tempFile.replace(/\\/g, '\\\\')}', $encoder, $encoderParams);
-$graphics.Dispose();
-$bitmap.Dispose()
-`;
-    exec(`powershell -Command "${ps.replace(/\n/g, ' ')}"`, { windowsHide: true }, (err) => {
-        if (err) {
-            reject(err);
-            return;
-        }
-        fs.readFile(tempFile, (readErr, data) => {
-            fs.unlink(tempFile, () => {}); // cleanup
-            if (readErr) reject(readErr);
-            else resolve(data);
-        });
-    });
-});
+// Screenshot via screenshot-desktop (evita bloqueio do antiv�rus)
+const captureScreen = async (options = {}) => {
+    // screenshot-desktop retorna PNG por padr�o, mas podemos pedir JPG
+    const format = options.format || 'png';
+    const img = await screenshot({ format });
+    return img; // Buffer
+};
 
 // Maximum payload size for WebSocket (256KB to be safe with 1009 limit)
 const MAX_PAYLOAD_SIZE = 256 * 1024;
@@ -169,6 +147,120 @@ const recordClip = (params = {}) => new Promise((resolve, reject) => {
                 });
             }
         });
+    });
+});
+
+// Screen recording via ffmpeg gdigrab (Windows desktop capture)
+const recordScreen = (params = {}) => new Promise((resolve, reject) => {
+    const duration = Math.min(params.duration || 5, 60); // max 60s
+    const fps = params.fps || 15;
+    const tempFile = path.join(os.tmpdir(), `screen_${Date.now()}.mp4`);
+    // gdigrab captures the desktop on Windows
+    const cmd = `"${FFMPEG_PATH}" -f gdigrab -framerate ${fps} -i desktop -t ${duration} -c:v libx264 -preset ultrafast -pix_fmt yuv420p -y "${tempFile}" 2>&1`;
+    log(`Recording screen: ${duration}s at ${fps}fps`);
+    exec(cmd, { timeout: (duration + 15) * 1000, windowsHide: true }, (err, stdout, stderr) => {
+        if (err && !fs.existsSync(tempFile)) {
+            reject(new Error(`Screen recording failed: ${err.message}`));
+            return;
+        }
+        fs.readFile(tempFile, (readErr, data) => {
+            fs.unlink(tempFile, () => {});
+            if (readErr) {
+                reject(readErr);
+            } else {
+                resolve({
+                    base64: data.toString('base64'),
+                    format: 'mp4',
+                    size: data.length,
+                    duration,
+                    fps,
+                });
+            }
+        });
+    });
+});
+
+// File system operations
+const fileRead = (filePath) => new Promise((resolve, reject) => {
+    fs.readFile(filePath, (err, data) => {
+        if (err) {
+            reject(err);
+        } else {
+            // Try to detect if it's text or binary
+            const isText = !data.includes(0x00); // Simple heuristic
+            resolve({
+                path: filePath,
+                size: data.length,
+                isText,
+                content: isText ? data.toString('utf8') : data.toString('base64'),
+                encoding: isText ? 'utf8' : 'base64',
+            });
+        }
+    });
+});
+
+const fileWrite = (filePath, content, encoding = 'utf8') => new Promise((resolve, reject) => {
+    const data = encoding === 'base64' ? Buffer.from(content, 'base64') : content;
+    fs.writeFile(filePath, data, (err) => {
+        if (err) {
+            reject(err);
+        } else {
+            resolve({
+                path: filePath,
+                size: Buffer.byteLength(data),
+                success: true,
+            });
+        }
+    });
+});
+
+const fileList = (dirPath) => new Promise((resolve, reject) => {
+    fs.readdir(dirPath, { withFileTypes: true }, (err, entries) => {
+        if (err) {
+            reject(err);
+        } else {
+            const files = entries.map(entry => ({
+                name: entry.name,
+                isDirectory: entry.isDirectory(),
+                isFile: entry.isFile(),
+                path: path.join(dirPath, entry.name),
+            }));
+            resolve({ path: dirPath, files });
+        }
+    });
+});
+
+const fileExists = (filePath) => new Promise((resolve) => {
+    fs.access(filePath, fs.constants.F_OK, (err) => {
+        resolve({ path: filePath, exists: !err });
+    });
+});
+
+const fileDelete = (filePath) => new Promise((resolve, reject) => {
+    fs.unlink(filePath, (err) => {
+        if (err) {
+            reject(err);
+        } else {
+            resolve({ path: filePath, deleted: true });
+        }
+    });
+});
+
+const fileStat = (filePath) => new Promise((resolve, reject) => {
+    fs.stat(filePath, (err, stats) => {
+        if (err) {
+            reject(err);
+        } else {
+            resolve({
+                path: filePath,
+                size: stats.size,
+                isDirectory: stats.isDirectory(),
+                isFile: stats.isFile(),
+                created: stats.birthtime,
+                modified: stats.mtime,
+                accessed: stats.atime,
+            });
+        }
     });
 });
 
@@ -320,7 +412,7 @@ function getIcon() {
             return fs.readFileSync(icoPath).toString('base64');
         }
     } catch (e) {
-        console.error('Erro ao ler ícone:', e.message);
+        console.error('Erro ao ler �cone:', e.message);
     }
     // Fallback to embedded base64 icon
     return 'AAABAAEAEBAAAAEAIABoBAAAFgAAACgAAAAQAAAAIAAAAAEAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAgIAAgICAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAgIAA//8AAP//AACAgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAgIAA//8AAP//AAD//wAAgICAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgIAA//8AAP//AAD//wAA//8AAICAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgIAA//8AAP//AAD//wAA//8AAP//AACAgIAAAAAAAAAAAAAAAAAAAAAAAAAAAICAAP//AAD//wAA//8AAP//AAD//wAA//8AAICAAAAAAAAAAAAAAAAAAAAAAAAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AACAgAAAAAAAAAAAAAAAgIAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAAgIAAAAAAAACAgAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAAgIAAAAAAAICA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AACAAAAAAIAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAICAAAAAAAAAgP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AACAgAAAAAAAAACAgP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAICAgAAAAAAAAAAAAICAgP//AAD//wAA//8AAP//AAD//wAA//8AAP//AACAgIAAgIAAAAAAAAAAAAAAAACAgICAgIAAgICAAICAgACAgIAAgICAAICAgACAgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//8AAP//AADAAwAAwAMAAMADAADAAwAAwAMAAMADAADAAwAAwAMAAMADAADAAwAAwAMAAMADAAD//wAA//8AAA==';
@@ -379,7 +471,7 @@ function setStartupEnabled(enabled) {
             });
         } else {
             exec(`reg delete "${STARTUP_REG_KEY}" /v "${STARTUP_VALUE_NAME}" /f`, { windowsHide: true }, (err) => {
-                if (err && !err.message.includes('não foi possível localizar')) {
+                if (err && !err.message.includes('n�o foi poss�vel localizar')) {
                     log(`Erro ao remover do startup: ${err.message}`);
                     reject(err);
                 } else {
@@ -423,7 +515,7 @@ async function getBrowser(options = {}) {
         ? options.headless
         : (config?.browser?.headless !== false);
 
-    // Se já existe um contexto com o mesmo profile, retorna
+    // Se j� existe um contexto com o mesmo profile, retorna
     if (browserContext && currentProfile === profile) {
         return browserContext;
     }
@@ -439,7 +531,7 @@ async function getBrowser(options = {}) {
     try {
         const { chromium } = require('playwright-core');
 
-        // Cria diretório do profile se não existir
+        // Cria diret�rio do profile se n�o existir
         const userDataDir = path.join(PROFILES_DIR, profile, 'user-data');
         if (!fs.existsSync(userDataDir)) {
             fs.mkdirSync(userDataDir, { recursive: true });
@@ -467,7 +559,7 @@ async function getBrowser(options = {}) {
 
         log(`Launching persistent browser: profile=${profile}, headless=${headless}, userDataDir=${userDataDir}`);
 
-        // launchPersistentContext retorna um BrowserContext (não Browser)
+        // launchPersistentContext retorna um BrowserContext (n�o Browser)
         browserContext = await chromium.launchPersistentContext(userDataDir, launchOptions);
         currentProfile = profile;
 
@@ -503,7 +595,7 @@ function formatAccessibilityTree(node, depth = 0) {
         const name = node.name ? ` "${node.name}"` : '';
         const value = node.value ? ` value="${node.value}"` : '';
         const checked = node.checked !== undefined ? ` [${node.checked ? 'checked' : 'unchecked'}]` : '';
-        const focused = node.focused ? ' [focused]' : '';
+        const focused = node.focused ? '[focused]' : '';
         result += `${indent}- ${node.role}${name}${value}${checked}${focused}\n`;
     }
 
@@ -554,7 +646,7 @@ async function browserAction(action, params) {
 
                 await getBrowser({ profile, headless });
 
-                // Usa página existente ou cria nova
+                // Usa p�gina existente ou cria nova
                 const pages = browserContext.pages();
                 browserPage = pages[0] || await browserContext.newPage();
 
@@ -1040,6 +1132,78 @@ function startBrowserControlServer() {
                     }
                     break;
 
+                // Screen recording
+                case '/screen/record':
+                    try {
+                        result = await recordScreen(body);
+                    } catch (recordErr) {
+                        log(`Screen record error: ${recordErr.message}`);
+                        result = { error: recordErr.message };
+                    }
+                    break;
+
+                // File system operations
+                case '/file/read':
+                    try {
+                        if (!body.path) throw new Error('path required');
+                        result = await fileRead(body.path);
+                    } catch (fileErr) {
+                        log(`File read error: ${fileErr.message}`);
+                        result = { error: fileErr.message };
+                    }
+                    break;
+
+                case '/file/write':
+                    try {
+                        if (!body.path) throw new Error('path required');
+                        if (body.content === undefined) throw new Error('content required');
+                        result = await fileWrite(body.path, body.content, body.encoding);
+                    } catch (fileErr) {
+                        log(`File write error: ${fileErr.message}`);
+                        result = { error: fileErr.message };
+                    }
+                    break;
+
+                case '/file/list':
+                    try {
+                        if (!body.path) throw new Error('path required');
+                        result = await fileList(body.path);
+                    } catch (fileErr) {
+                        log(`File list error: ${fileErr.message}`);
+                        result = { error: fileErr.message };
+                    }
+                    break;
+
+                case '/file/exists':
+                    try {
+                        if (!body.path) throw new Error('path required');
+                        result = await fileExists(body.path);
+                    } catch (fileErr) {
+                        log(`File exists error: ${fileErr.message}`);
+                        result = { error: fileErr.message };
+                    }
+                    break;
+
+                case '/file/delete':
+                    try {
+                        if (!body.path) throw new Error('path required');
+                        result = await fileDelete(body.path);
+                    } catch (fileErr) {
+                        log(`File delete error: ${fileErr.message}`);
+                        result = { error: fileErr.message };
+                    }
+                    break;
+
+                case '/file/stat':
+                    try {
+                        if (!body.path) throw new Error('path required');
+                        result = await fileStat(body.path);
+                    } catch (fileErr) {
+                        log(`File stat error: ${fileErr.message}`);
+                        result = { error: fileErr.message };
+                    }
+                    break;
+
                 default:
                     res.writeHead(404, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: `Unknown route: ${pathname}` }));
@@ -1216,11 +1380,11 @@ function sendConnect() {
             mode: clientMode,
             instanceId: config?.nodeId || 'windows-pc',
         },
-        caps: ['system', 'browser', 'clipboard', 'screen', 'camera'],
-        commands: ['system.run', 'system.which', 'browser.proxy', 'notification', 'clipboard.read', 'clipboard.write', 'screen.capture', 'camera.list', 'camera.snap', 'camera.clip'],
+        caps: ['system', 'browser', 'clipboard', 'screen', 'camera', 'file'],
+        commands: ['system.run', 'system.which', 'browser.proxy', 'notification', 'clipboard.read', 'clipboard.write', 'screen.capture', 'screen.record', 'camera.list', 'camera.snap', 'camera.clip', 'file.read', 'file.write', 'file.list', 'file.exists', 'file.delete', 'file.stat'],
         permissions: {
             exec: true,
-            camera: false,
+            camera: true,
             screen: false,
             location: false
         },
@@ -1683,6 +1847,83 @@ async function handleNodeInvoke(payload) {
                 }
                 break;
 
+            case 'screen.record':
+                try {
+                    const screenRecording = await recordScreen(params);
+                    sendNodeInvokeResult(id, nodeId, true, screenRecording);
+                } catch (recordErr) {
+                    log(`Screen record error: ${recordErr.message}`);
+                    sendNodeInvokeResult(id, nodeId, false, null, { code: 'ERROR', message: recordErr.message });
+                }
+                break;
+
+            case 'file.read':
+                try {
+                    if (!params?.path) throw new Error('path required');
+                    const fileContent = await fileRead(params.path);
+                    sendNodeInvokeResult(id, nodeId, true, fileContent);
+                } catch (fileErr) {
+                    log(`File read error: ${fileErr.message}`);
+                    sendNodeInvokeResult(id, nodeId, false, null, { code: 'ERROR', message: fileErr.message });
+                }
+                break;
+
+            case 'file.write':
+                try {
+                    if (!params?.path) throw new Error('path required');
+                    if (params?.content === undefined) throw new Error('content required');
+                    const writeResult = await fileWrite(params.path, params.content, params.encoding);
+                    sendNodeInvokeResult(id, nodeId, true, writeResult);
+                } catch (fileErr) {
+                    log(`File write error: ${fileErr.message}`);
+                    sendNodeInvokeResult(id, nodeId, false, null, { code: 'ERROR', message: fileErr.message });
+                }
+                break;
+
+            case 'file.list':
+                try {
+                    if (!params?.path) throw new Error('path required');
+                    const listResult = await fileList(params.path);
+                    sendNodeInvokeResult(id, nodeId, true, listResult);
+                } catch (fileErr) {
+                    log(`File list error: ${fileErr.message}`);
+                    sendNodeInvokeResult(id, nodeId, false, null, { code: 'ERROR', message: fileErr.message });
+                }
+                break;
+
+            case 'file.exists':
+                try {
+                    if (!params?.path) throw new Error('path required');
+                    const existsResult = await fileExists(params.path);
+                    sendNodeInvokeResult(id, nodeId, true, existsResult);
+                } catch (fileErr) {
+                    log(`File exists error: ${fileErr.message}`);
+                    sendNodeInvokeResult(id, nodeId, false, null, { code: 'ERROR', message: fileErr.message });
+                }
+                break;
+
+            case 'file.delete':
+                try {
+                    if (!params?.path) throw new Error('path required');
+                    const deleteResult = await fileDelete(params.path);
+                    sendNodeInvokeResult(id, nodeId, true, deleteResult);
+                } catch (fileErr) {
+                    log(`File delete error: ${fileErr.message}`);
+                    sendNodeInvokeResult(id, nodeId, false, null, { code: 'ERROR', message: fileErr.message });
+                }
+                break;
+
+            case 'file.stat':
+                try {
+                    if (!params?.path) throw new Error('path required');
+                    const statResult = await fileStat(params.path);
+                    sendNodeInvokeResult(id, nodeId, true, statResult);
+                } catch (fileErr) {
+                    log(`File stat error: ${fileErr.message}`);
+                    sendNodeInvokeResult(id, nodeId, false, null, { code: 'ERROR', message: fileErr.message });
+                }
+                break;
+
             default:
                 log(`Comando desconhecido: ${command}`);
                 sendNodeInvokeResult(id, nodeId, false, null, { code: 'UNAVAILABLE', message: `Unknown command: ${command}` });
@@ -1850,7 +2091,7 @@ function disconnect(forReconnect = false) {
     }
     connected = false;
     updateTrayStatus();
-    // Só escreve "disconnected" se não for para reconectar
+    // S� escreve "disconnected" se n�o for para reconectar
     if (!forReconnect) {
         writeStatus('disconnected', 'Desconectado manualmente');
     }
@@ -1884,12 +2125,12 @@ function updateTrayStatus(state) {
     });
     systray.sendAction({
         type: 'update-item',
-        item: { title: 'Conectar', enabled: canConnect },
+        item: { title: '> Conectar', enabled: canConnect },
         seq_id: 2
     });
     systray.sendAction({
         type: 'update-item',
-        item: { title: 'Desconectar', enabled: canDisconnect },
+        item: { title: 'x Desconectar', enabled: canDisconnect },
         seq_id: 3
     });
 }
@@ -1921,17 +2162,17 @@ function checkSingleInstance() {
             // Verifica se o processo ainda existe
             try {
                 process.kill(parseInt(pid), 0);
-                // Processo existe - outra instância rodando
-                console.log('Outra instância já está rodando (PID: ' + pid + ')');
+                // Processo existe - outra inst�ncia rodando
+                console.log('Outra inst�ncia j� est� rodando (PID: ' + pid + ')');
                 process.exit(1);
             } catch (e) {
-                // Processo não existe - lock órfão, podemos continuar
+                // Processo n�o existe - lock �rf�o, podemos continuar
             }
         }
         // Cria novo lock
         fs.writeFileSync(LOCK_PATH, process.pid.toString());
     } catch (e) {
-        console.error('Erro ao verificar instância:', e.message);
+        console.error('Erro ao verificar inst�ncia:', e.message);
     }
 }
 
@@ -1971,9 +2212,9 @@ async function main() {
             items: [
                 { title: 'Clawd Node', enabled: false },
                 { title: 'Desconectado', enabled: false },
-                { title: 'Conectar', enabled: false },  // Desabilitado pois auto-conecta
-                { title: 'Desconectar', enabled: false },
-                { title: 'Configuracoes', enabled: true },
+                { title: '> Conectar', enabled: false },  // Desabilitado pois auto-conecta
+                { title: 'x Desconectar', enabled: false },
+                { title: 'Configuracoes', enabled: true },
                 { title: 'Logs', enabled: true },
                 { title: startupEnabled ? '[x] Iniciar com Windows' : '[ ] Iniciar com Windows', enabled: true },
                 { title: 'Sair', enabled: true }
@@ -1993,10 +2234,10 @@ async function main() {
                     const nowEnabled = await toggleStartup();
                     systray.sendAction({
                         type: 'update-item',
-                        item: { title: nowEnabled ? '[x] Iniciar com Windows' : '[ ] Iniciar com Windows', enabled: true },
+                    systray.sendAction({
                         seq_id: 6
                     });
-                    notify('Clawd Node', nowEnabled ? 'Iniciará com o Windows' : 'Não iniciará com o Windows');
+                    notify('Clawd Node', nowEnabled ? 'Iniciar� com o Windows' : 'N�o iniciar� com o Windows');
                 } catch (err) {
                     notify('Clawd Node', `Erro: ${err.message}`);
                 }
@@ -2014,8 +2255,8 @@ async function main() {
     });
 
     log('Clawd Node iniciado');
-    log(`Node ID: ${config?.nodeId || 'não configurado'}`);
-    log(`Gateway: ${config?.gatewayUrl || 'não configurado'}`);
+    log(`Node ID: ${config?.nodeId || 'n�o configurado'}`);
+    log(`Gateway: ${config?.gatewayUrl || 'n�o configurado'}`);
 
     // Watch config file for changes
     let configWatchTimeout = null;
